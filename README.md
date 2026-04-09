@@ -31,9 +31,9 @@ Es el punto de entrada y salida del sistema. Intercambia mensajes con los client
 
 ### Sum
  
-Recibe pares  (fruta, cantidad) y aplica la función Suma de la clase `Fruit Item`. Por defecto esa suma es la canónica para los números enteros, ej:
+Recibe pares  (fruta, cantidad) y aplica la función Suma de la clase `FruitItem`. Por defecto esa suma es la canónica para los números enteros, ej:
 
-` ("manzana", 5) + ("manzana", 8) = ("manzana", 13)`
+`("manzana", 5) + ("manzana", 8) = ("manzana", 13)`
 
 Pero su implementación podría modificarse.
 Cuando se detecta el final de la ingesta de datos envía los pares (fruta, cantidad) totales a los Aggregators.
@@ -50,7 +50,7 @@ Cuando se detecta el final de la ingesta, se envía el top final hacia el gatewa
 
 ## Limitaciones del esqueleto provisto
 
-La implementación base respeta la división de responsabilidades de los distintos controles y hace uso de la clase `Fruit Item` como un elemento opaco, sin asumir la implementación de las funciones de Suma y Comparación.
+La implementación base respeta la división de responsabilidades de los distintos controles y hace uso de la clase `FruitItem` como un elemento opaco, sin asumir la implementación de las funciones de Suma y Comparación.
 
 No obstante, esta implementación no cubre los objetivos buscados tal y como es presentada. Entre sus falencias puede destactarse que:
 
@@ -63,7 +63,7 @@ No obstante, esta implementación no cubre los objetivos buscados tal y como es 
 
 ## Condiciones de Entrega
 
-El código de este repositorio se agrupa en dos carpetas, una para Python y otra para Golang. Los estudiantes deberán elegir **sólo uno** de estos lenguajes y realizar una implementación que funcione correctamente ante cambios en la multiplicidad de los controles (archivo de docker compose), los archivos de entrada y las implementaciones de las funciones de Suma y Comparación del `Fruit Item`.
+El código de este repositorio se agrupa en dos carpetas, una para Python y otra para Golang. Los estudiantes deberán elegir **sólo uno** de estos lenguajes y realizar una implementación que funcione correctamente ante cambios en la multiplicidad de los controles (archivo de docker compose), los archivos de entrada y las implementaciones de las funciones de Suma y Comparación del `FruitItem`.
 
 ![ ](./imgs/mutabilidad.jpg  "Mutabilidad de Elementos")
 *Fig. 2: Elementos mutables e inmutables*
@@ -76,6 +76,6 @@ Al momento de la evaluación y ejecución de las pruebas se **descartarán** o *
 - Todos los archivos Dockerfile.
 - Todo el código del cliente.
 - Todo el código del gateway, salvo `message_handler`.
-- La implementación del protocolo de comunicación externo y **Fruit Item**.
+- La implementación del protocolo de comunicación externo y `FruitItem`.
 
 Redactar un breve informe explicando el modo en que se coordinan las instancias de Sum y Aggregation, así como el modo en el que el sistema escala respecto a los clientes y a la cantidad de controles.
