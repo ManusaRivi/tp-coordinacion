@@ -1,5 +1,9 @@
 import json
 
+class SumControlMessageType:
+    FLUSH_REQUEST = 1
+    FLUSH_SUCCESS = 2
+
 
 def serialize(message):
     return json.dumps(message).encode("utf-8")
