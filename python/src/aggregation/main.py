@@ -23,25 +23,25 @@ class AggregationFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
-        self.fruit_top = []
+        self.fruit_tops_by_client_id = {}
         self.client_ids = set()
 
     def _process_data(self, client_id, fruit, amount):
-        if client_id not in self.client_ids:
-            logging.info(f"Received first message from client {client_id}")
-            self.client_ids.add(client_id)
+        if client_id not in self.fruit_tops_by_client_id:
+            self.fruit_tops_by_client_id[client_id] = []
         logging.info("Processing data message")
-        for i in range(len(self.fruit_top)):
-            if self.fruit_top[i].fruit == fruit:
-                self.fruit_top[i] = self.fruit_top[i] + fruit_item.FruitItem(
+        fruit_top = self.fruit_tops_by_client_id[client_id]
+        for i in range(len(fruit_top)):
+            if fruit_top[i].fruit == fruit:
+                fruit_top[i] = fruit_top[i] + fruit_item.FruitItem(
                     fruit, amount
                 )
                 return
-        bisect.insort(self.fruit_top, fruit_item.FruitItem(fruit, amount))
+        bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
 
     def _process_eof(self, client_id):
         logging.info("Received EOF")
-        fruit_chunk = list(self.fruit_top[-TOP_SIZE:])
+        fruit_chunk = list(self.fruit_tops_by_client_id[client_id][-TOP_SIZE:])
         fruit_chunk.reverse()
         fruit_top = list(
             map(

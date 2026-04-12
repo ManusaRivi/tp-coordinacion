@@ -24,17 +24,20 @@ class SumFilter:
                 MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
             )
             self.data_output_exchanges.append(data_output_exchange)
-        self.amount_by_fruit = {}
+        self.fruit_amount_by_client_id = {}
+        self.client_ids = set()
 
     def _process_data(self, client_id, fruit, amount):
         logging.info(f"Process data")
-        self.amount_by_fruit[fruit] = self.amount_by_fruit.get(
+        if client_id not in self.fruit_amount_by_client_id:
+            self.fruit_amount_by_client_id[client_id] = {}
+        self.fruit_amount_by_client_id[client_id][fruit] = self.fruit_amount_by_client_id[client_id].get(
             fruit, fruit_item.FruitItem(fruit, 0)
         ) + fruit_item.FruitItem(fruit, int(amount))
 
     def _process_eof(self, client_id):
         logging.info(f"Broadcasting data messages")
-        for final_fruit_item in self.amount_by_fruit.values():
+        for final_fruit_item in self.fruit_amount_by_client_id[client_id].values():
             for data_output_exchange in self.data_output_exchanges:
                 data_output_exchange.send(
                     message_protocol.internal.serialize(
