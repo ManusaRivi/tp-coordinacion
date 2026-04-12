@@ -24,8 +24,12 @@ class AggregationFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
         self.fruit_top = []
+        self.client_ids = set()
 
-    def _process_data(self, fruit, amount):
+    def _process_data(self, client_id, fruit, amount):
+        if client_id not in self.client_ids:
+            logging.info(f"Received first message from client {client_id}")
+            self.client_ids.add(client_id)
         logging.info("Processing data message")
         for i in range(len(self.fruit_top)):
             if self.fruit_top[i].fruit == fruit:
@@ -35,7 +39,7 @@ class AggregationFilter:
                 return
         bisect.insort(self.fruit_top, fruit_item.FruitItem(fruit, amount))
 
-    def _process_eof(self):
+    def _process_eof(self, client_id):
         logging.info("Received EOF")
         fruit_chunk = list(self.fruit_top[-TOP_SIZE:])
         fruit_chunk.reverse()
@@ -45,16 +49,15 @@ class AggregationFilter:
                 fruit_chunk,
             )
         )
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
-        del self.fruit_top
+        self.output_queue.send(message_protocol.internal.serialize([client_id] + fruit_top))
 
     def process_messsage(self, message, ack, nack):
         logging.info("Process message")
         fields = message_protocol.internal.deserialize(message)
-        if len(fields) == 2:
+        if len(fields) == 3:
             self._process_data(*fields)
         else:
-            self._process_eof()
+            self._process_eof(*fields)
         ack()
 
     def start(self):
