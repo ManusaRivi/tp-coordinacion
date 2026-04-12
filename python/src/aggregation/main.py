@@ -30,13 +30,20 @@ class AggregationFilter:
         if client_id not in self.fruit_tops_by_client_id:
             self.fruit_tops_by_client_id[client_id] = []
         logging.info("Processing data message")
+        # Check if the fruit's already in the list and save the index:
+        # After list is iterated, element is removed and reinserted.
+        # Otherwise, it's modified in the same spot and the sorting is broken.
+        already_in_list = False
+        previous_index = 0
         fruit_top = self.fruit_tops_by_client_id[client_id]
         for i in range(len(fruit_top)):
             if fruit_top[i].fruit == fruit:
-                fruit_top[i] = fruit_top[i] + fruit_item.FruitItem(
-                    fruit, amount
-                )
-                return
+                already_in_list = True
+                previous_index = i
+        if already_in_list:
+            amount += fruit_top[previous_index].amount
+            fruit_top.pop(previous_index)
+        
         bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
 
     def _process_eof(self, client_id):
