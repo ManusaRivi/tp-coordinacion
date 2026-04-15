@@ -18,7 +18,12 @@ Una o varias instancias de Sum van a recibir frutas del mismo cliente, pero solo
 
 Si el `EOF` es recibido, entonces todas las frutas del cliente fueron recibidas por una o más instancias. Por lo tanto, la instancia de Sum que recibe el `EOF` se encargará de notificar a las demás instancias de Sum que deben flushear sus sumas a los aggregators.
 
-Para esto, utilizamos un exchange llamado `control_exchange`. Cada instancia de Sum se suscribe al exchange y las routing keys con las que interactuará serán correspondientes a las demás instancias de Sum presentes en el sistema, aprovechando que conocemos cuántas hay.
+Para esto, utilizamos un exchange llamado `control_exchange`. Cada instancia de Sum se suscribe al exchange y las routing keys con las que interactuará serán correspondientes a las demás instancias de Sum presentes en el sistema, aprovechando que conocemos cuántas hay. Cada worker lanza un thread para consumir de forma concurrente de este exchange y de su respectiva `input_queue`.
+
+JUSTIFICAR THREADING EN LUGAR DE MULTIPROCESSING EN ESTE USE CASE
+El Thread esta consumiendo de un exchange. La mayor parte del tiempo esta bloqueado escuchando, en una operacion I/O.
+
+Cuando le toca operar, manda lo que tiene que mandar y termina. No esta siendo usado para intercalar computo intensivo entre el thread que procesa datos de la `input_queue` y el que consume del `control_exchange`.
 
 En este exchange se envian dos tipos de mensajes, definidos en common/message_protocol/internal.py:
 1. `FLUSH_REQUEST (coordinator_id, client_id)`
@@ -29,3 +34,13 @@ En este exchange se envian dos tipos de mensajes, definidos en common/message_pr
 Supuesto: ahora mismo, si un worker no tiene datos almacenados para el cliente a la hora de recibir FLUSH_REQUEST, asumo que es porque no recibió ninguna fruta de ese cliente, por ende debe darse como finalizado para ese cliente de todas formas.
 
 Posible mejora: abstraer el messaging en un `MessageHandler` del Sum.
+
+## 3. Coordinación entre instancias Aggregator
+
+Los Sum dejan de broadcastear a todos los aggregators: cada par cliente-fruta se mapea a un aggregator (lo mismo para el EOF).
+
+De esa forma no se duplican los datos y no tenemos tops que no son reales.
+
+El joiner junta un top por cada aggregator por cada cliente.
+
+Los aggregators se coordinan entre si.
