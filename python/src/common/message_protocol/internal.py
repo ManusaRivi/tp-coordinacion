@@ -1,6 +1,6 @@
 import json
 
-class SumControlMessageType:
+class WorkerControlMessageType:
     FLUSH_REQUEST = 1
     FLUSH_SUCCESS = 2
 
