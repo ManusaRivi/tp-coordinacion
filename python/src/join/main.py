@@ -22,11 +22,42 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.amount_by_fruit_by_client_id = {}
+        self.tops_received_by_client_id = {}
 
     def process_messsage(self, message, ack, nack):
         logging.info("Received top")
-        fruit_top = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
+        fields = message_protocol.internal.deserialize(message)
+        if len(fields) < 1:
+            logging.error("Received top message with invalid format")
+            nack()
+            return
+
+        client_id = fields[0]
+        fruit_top = fields[1:]
+
+        self.tops_received_by_client_id[client_id] = self.tops_received_by_client_id.get(client_id, 0) + 1
+
+        if client_id not in self.amount_by_fruit_by_client_id:
+            self.amount_by_fruit_by_client_id[client_id] = {}
+        client_amount_by_fruit = self.amount_by_fruit_by_client_id[client_id]
+
+        for fruit, amount in fruit_top:
+            current_fruit_item = client_amount_by_fruit.get(fruit, fruit_item.FruitItem(fruit, 0))
+            client_amount_by_fruit[fruit] = current_fruit_item + fruit_item.FruitItem(fruit, int(amount))
+
+        if self.tops_received_by_client_id[client_id] == AGGREGATION_AMOUNT:
+            logging.info(f"Received all tops for client {client_id}, sending output message")
+            fruit_top = sorted(client_amount_by_fruit.values())
+            fruit_top.reverse()
+            fruit_top = fruit_top[:TOP_SIZE]
+            serialized_fruit_top = list(
+                map(
+                    lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
+                    fruit_top,
+                )
+            )
+            self.output_queue.send(message_protocol.internal.serialize([client_id] + serialized_fruit_top))
         ack()
 
     def start(self):
