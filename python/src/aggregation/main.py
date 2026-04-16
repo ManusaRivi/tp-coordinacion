@@ -59,6 +59,7 @@ class AggregationFilter:
 
     def _process_eof(self, client_id):
         logging.info(f"Received EOF, broadcasting flush request for client {client_id}")
+        self._send_fruit_top_for_client(client_id)
         with self.resourceLock:
             self.workers_finished_by_client_id[client_id] = 1
             for instance_id, control_exchange in self.control_exchanges.items():
@@ -69,9 +70,9 @@ class AggregationFilter:
                         client_id
                     ]))
     
-    def _send_fruit_top(self, coordinator_id, client_id):
-        logging.info(f"FLUSH_REQUEST received for client {client_id}, sending top to output_queue")
+    def _send_fruit_top_for_client(self, client_id):
         with self.resourceLock:
+            logging.info(f"Sending top message")
             fruit_top = []
             if client_id in self.fruit_tops_by_client_id:
                 fruit_chunk = list(self.fruit_tops_by_client_id[client_id][-TOP_SIZE:])
@@ -82,8 +83,13 @@ class AggregationFilter:
                         fruit_chunk,
                     )
                 )
-            self.output_queue.send(message_protocol.internal.serialize([client_id] + fruit_top))
-            logging.info(f"Sending FLUSH_SUCCESS message to coordinator {coordinator_id}")
+                self.output_queue.send(message_protocol.internal.serialize([client_id] + fruit_top))
+    
+    def _process_flush_request(self, coordinator_id, client_id):
+        logging.info(f"FLUSH_REQUEST received for client {client_id}, sending top to output_queue")
+        self._send_fruit_top_for_client(client_id)
+        logging.info(f"Sending FLUSH_SUCCESS message to coordinator {coordinator_id}")
+        with self.resourceLock:
             self.control_exchanges[coordinator_id].send(message_protocol.internal.serialize([
                 message_protocol.internal.WorkerControlMessageType.FLUSH_SUCCESS,
                 client_id
@@ -97,19 +103,6 @@ class AggregationFilter:
             ) + 1
             if self.workers_finished_by_client_id[client_id] == AGGREGATION_AMOUNT:
                 logging.info(f"All other workers have sent their top for client {client_id}")
-                logging.info(f"Sending top message")
-
-                fruit_top = []
-                if client_id in self.fruit_tops_by_client_id:
-                    fruit_chunk = list(self.fruit_tops_by_client_id[client_id][-TOP_SIZE:])
-                    fruit_chunk.reverse()
-                    fruit_top = list(
-                        map(
-                            lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
-                            fruit_chunk,
-                        )
-                    )
-                self.output_queue.send(message_protocol.internal.serialize([client_id] + fruit_top))
 
     def process_messsage(self, message, ack, nack):
         logging.info("Process message")
@@ -124,7 +117,7 @@ class AggregationFilter:
         fields = message_protocol.internal.deserialize(message)
         logging.info(f"Processing aggregation control message: {fields}")
         if fields[0] == message_protocol.internal.WorkerControlMessageType.FLUSH_REQUEST:
-            self._send_fruit_top(*fields[1:])
+            self._process_flush_request(*fields[1:])
         elif fields[0] == message_protocol.internal.WorkerControlMessageType.FLUSH_SUCCESS:
             self._process_worker_finished(*fields[1:])
         else:
