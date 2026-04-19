@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 import threading
 import zlib
 
@@ -35,6 +36,7 @@ class SumFilter:
         self.workers_finished_by_client_id = {}
 
         self.resourceLock = threading.Lock()
+        self.coordination_thread = None
 
     def _aggregation_id_for_fruit(self, client_id, fruit):
         key = f"{client_id}:{fruit}".encode("utf-8")
@@ -141,12 +143,25 @@ class SumFilter:
         ack()
 
     def start(self):
-        threading.Thread(target=self.control_exchanges[ID].start_consuming, args=(self.process_sum_sync,)).start()
+        self.coordination_thread = threading.Thread(target=self.control_exchanges[ID].start_consuming, args=(self.process_sum_sync,)).start()
         self.input_queue.start_consuming(self.process_data_messsage)
+    
+    def stop(self):
+        logging.info("Stopping SumFilter")
+        self.input_queue.stop_consuming()
+        for control_exchange in self.control_exchanges.values():
+            control_exchange.stop_consuming()
+        if self.coordination_thread:
+            self.coordination_thread.join()
+        logging.info("SumFilter stopped")
 
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
+    signal.signal(
+        signal.SIGTERM,
+        lambda signum, frame: sum_filter.stop(),
+    )
     sum_filter.start()
     return 0
 

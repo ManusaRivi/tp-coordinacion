@@ -1,6 +1,7 @@
 import os
 import logging
 import bisect
+import signal
 import threading
 
 from common import middleware, message_protocol, fruit_item
@@ -35,6 +36,7 @@ class AggregationFilter:
         self.workers_finished_by_client_id = {}
 
         self.resourceLock = threading.Lock()
+        self.coordination_thread = None
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
@@ -127,13 +129,27 @@ class AggregationFilter:
         ack()
 
     def start(self):
-        threading.Thread(target=self.control_exchanges[ID].start_consuming, args=(self.process_aggregation_sync,)).start()
+        self.coordination_thread = threading.Thread(target=self.control_exchanges[ID].start_consuming, args=(self.process_aggregation_sync,)).start()
         self.input_exchange.start_consuming(self.process_messsage)
+    
+    def stop(self):
+        logging.info("Stopping AggregationFilter")
+        self.input_exchange.stop_consuming()
+        for control_exchange in self.control_exchanges.values():
+            control_exchange.stop_consuming()
+        self.output_queue.close()
+        if self.coordination_thread:
+            self.coordination_thread.join()
+        logging.info("AggregationFilter stopped")
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     aggregation_filter = AggregationFilter()
+    signal.signal(
+        signal.SIGTERM,
+        lambda signum, frame: aggregation_filter.stop(),
+    )
     aggregation_filter.start()
     return 0
 
