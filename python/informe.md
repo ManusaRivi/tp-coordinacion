@@ -20,27 +20,26 @@ Si el `EOF` es recibido, entonces todas las frutas del cliente fueron recibidas 
 
 Para esto, utilizamos un exchange llamado `control_exchange`. Cada instancia de Sum se suscribe al exchange y las routing keys con las que interactuará serán correspondientes a las demás instancias de Sum presentes en el sistema, aprovechando que conocemos cuántas hay. Cada worker lanza un thread para consumir de forma concurrente de este exchange y de su respectiva `input_queue`.
 
-JUSTIFICAR THREADING EN LUGAR DE MULTIPROCESSING EN ESTE USE CASE
-El Thread esta consumiendo de un exchange. La mayor parte del tiempo esta bloqueado escuchando, en una operacion I/O.
+El Thread esta consumiendo de un exchange. La mayor parte del tiempo esta bloqueado escuchando, en una operacion I/O. No hay intercalado de cómputo intensivo entre los threads, la mayor parte del tiempo el thread que consume del exchange de control está bloqueado. Cuando recibe un mensaje va a buscar tomar el lock y procesar el mensaje que recibió de forma atómica. Una vez que finaliza, se vuelve a escuchar.
 
-Cuando le toca operar, manda lo que tiene que mandar y termina. No esta siendo usado para intercalar computo intensivo entre el thread que procesa datos de la `input_queue` y el que consume del `control_exchange`.
+Dada esta circunstancia, es aceptable el uso de un thread en lugar de un proceso aparte, ya que el GIL no va a perjudicarnos si cada thread está bloqueado consumiendo de un Middleware.
 
 En este exchange se envian dos tipos de mensajes, definidos en common/message_protocol/internal.py:
-1. `FLUSH_REQUEST (coordinator_id, client_id)`
+1. `RECORD_COUNT_REQUEST (coordinator_id, client_id)`
+    El coordinador envía este mensaje a los demás workers para contar el total de registros recolectados para un cliente.
+2. `RECORD_COUNT_RESPONSE (client_id, record_count)`
+    El worker le response al coordenador la cantidad de frutas que proceso,
+3. `FLUSH_REQUEST (coordinator_id, client_id)`
     Este mensaje es enviado por el coordinador a los demás workers cuando recibe el `EOF` del Cliente. Las instancias que lo reciban deben enviar a su data_output_exchange el resultado obtenido para el cliente en cuestión, y luego responder enviando al coordinador un mensaje de `FLUSH_SUCCESS`.
-2. `FLUSH_SUCCESS (client_id)`
+4. `FLUSH_SUCCESS (client_id)`
     Este mensaje indica que un no-coordinador ha enviado sus datos al data_output_exchange con éxito. El coordinador va llevar la cuenta de cuántos workers terminaron para cada cliente, y una vez que la cantidad sea igual a la cantidad de workers en total, envía el EOF al aggregator (El coordinador se cuenta a sí mismo al recibir el `EOF`).
 
-Supuesto: ahora mismo, si un worker no tiene datos almacenados para el cliente a la hora de recibir FLUSH_REQUEST, asumo que es porque no recibió ninguna fruta de ese cliente, por ende debe darse como finalizado para ese cliente de todas formas.
+Nota: si un worker no tiene datos almacenados para el cliente a la hora de recibir FLUSH_REQUEST, asumo que es porque no recibió ninguna fruta de ese cliente, por ende debe darse como finalizado para ese cliente de todas formas. Como ya estamos verificando que el total de frutas recibidas en todos los workers concide con el total de frutas del cliente, esto no genera problemas.
 
-Posible mejora: abstraer el messaging en un `MessageHandler` del Sum.
+Para asegurar que todos los datos sean correctamente enviados a los aggregators se implementa un sistema de dos pasadas:
+La primera se ejecuta cuando un worker recibe un eof (y el total de registros) de un cliente. Va a pedirles a los demás workers que le digan cuántas frutas procesaron cada uno para ese cliente. Luego va a verificar que el total de todos los workers coincida con el total esperado.
+Si el total procesado es menor que el esperado, deben haber datos aún esperando a ser procesados por alguno(s) de los workers. Si esto sucede, el coordinador espera un cierto tiempo parametrizado (RETRY_SLEEP_SECONDS) y luego reinicia la suma de registros. Va a reintentar un máximo de veces parametrizado (MAX_RETRY_ATTEMPTS), al superar esta cantidad de intentos los workers flushean sus datos a los aggregators. Serán resultados incompletos, pero son resultados.
 
 ## 3. Coordinación entre instancias Aggregator
 
-Los Sum dejan de broadcastear a todos los aggregators: cada par cliente-fruta se mapea a un aggregator (lo mismo para el EOF).
-
-De esa forma no se duplican los datos y no tenemos tops que no son reales.
-
-El joiner junta un top por cada aggregator por cada cliente.
-
-Los aggregators se coordinan entre si.
+Los workers sum mapean cada par cliente-fruta con un aggregator, usando la librería zlib. Es un mapeo determinístico, para asegurarnos que cada cliente-fruta vaya a parar al mismo worker aggregator. De esta forma, los tops de los aggregators son precisos. Para los eof, cada worker envía un eof a cada aggregator. A su vez, los workers aggregator llevan la cuenta de los eof recibidos de cada worker sum: si reciben un eof de cada worker sum (SUM_AMOUNT) pueden enviar sus datos al join.
