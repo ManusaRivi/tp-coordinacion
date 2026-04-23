@@ -2,6 +2,7 @@ import os
 import logging
 import signal
 import threading
+import time
 import zlib
 
 from common import middleware, message_protocol, fruit_item
@@ -14,6 +15,9 @@ SUM_PREFIX = os.environ["SUM_PREFIX"]
 SUM_CONTROL_EXCHANGE = "SUM_CONTROL_EXCHANGE"
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
+
+MAX_RETRY_ATTEMPTS = 2
+RETRY_SLEEP_SECONDS = 5
 
 class SumFilter:
     def __init__(self):
@@ -34,7 +38,7 @@ class SumFilter:
             self.control_exchanges[i] = control_exchange
         self.fruit_amount_by_client_id = {}
         self.workers_finished_by_client_id = {}
-
+        self.retries_by_client_id = {}
         self.current_records_by_client = {}
         self.total_records_by_client = {}
         # This dictionary is used to count how many total records were received across all workers for a given client.
@@ -81,6 +85,17 @@ class SumFilter:
                     message_protocol.internal.WorkerControlMessageType.FLUSH_SUCCESS,
                     client_id
                 ]))
+
+    
+    def _broadcast_record_count_request(self, client_id):
+        logging.info(f"Broadcasting RECORD_COUNT_REQUEST for client {client_id}")
+        for instance_id, control_exchange in self.control_exchanges.items():
+            if instance_id != ID:
+                control_exchange.send(message_protocol.internal.serialize([
+                    message_protocol.internal.WorkerControlMessageType.RECORD_COUNT_REQUEST,
+                    ID,
+                    client_id
+                ]))
     
     
     """
@@ -101,7 +116,6 @@ class SumFilter:
     def _process_eof(self, client_id, amount_of_records):
         logging.info(f"EOF Received for client {client_id}")
         with self.resourceLock:
-            self.workers_finished_by_client_id[client_id] = 1
             self.aggregate_records_by_client[client_id] = self.aggregate_records_by_client.get(client_id, 0) + self.current_records_by_client.get(client_id, 0)
             self.total_records_by_client[client_id] = self.total_records_by_client.get(client_id, 0) + amount_of_records
             logging.info(f"Worker {ID} has sent all data for client {client_id}. Total records sent by this client: {amount_of_records}")
@@ -112,13 +126,7 @@ class SumFilter:
                 return
             # The Sum worker that receives the EOF message becomes the Coordinator.
             logging.info(f"Broadcasting sum control message to other workers")
-            for instance_id, control_exchange in self.control_exchanges.items():
-                if instance_id != ID:
-                    control_exchange.send(message_protocol.internal.serialize([
-                        message_protocol.internal.WorkerControlMessageType.RECORD_COUNT_REQUEST,
-                        ID,
-                        client_id
-                    ]))
+            self._broadcast_record_count_request(client_id)
     
     
     """
@@ -139,9 +147,30 @@ class SumFilter:
     def _process_count_response(self, client_id, record_count):
         logging.info(f"RECORD_COUNT_RESPONSE received for client {client_id}, record count {record_count}")
         with self.resourceLock:
+            self.workers_finished_by_client_id[client_id] = self.workers_finished_by_client_id.get(client_id, 0) + 1
             self.aggregate_records_by_client[client_id] = self.aggregate_records_by_client.get(client_id, 0) + record_count
             if self.aggregate_records_by_client[client_id] < self.total_records_by_client[client_id]:
                 logging.info(f"Waiting for more responses for client {client_id}. Total: {self.aggregate_records_by_client[client_id]}, expected: {self.total_records_by_client[client_id]}")
+                if self.workers_finished_by_client_id[client_id] == SUM_AMOUNT - 1:
+                    if self.retries_by_client_id[client_id] == MAX_RETRY_ATTEMPTS:
+                        logging.error(f"Exceeded retry attempts for client {client_id}, expected {self.total_records_by_client[client_id]} records but got {self.aggregate_records_by_client[client_id]}. Flushing data to aggregation anyway.")
+                        for instance_id, control_exchange in self.control_exchanges.items():
+                            if instance_id != ID:
+                                control_exchange.send(message_protocol.internal.serialize([
+                                    message_protocol.internal.WorkerControlMessageType.FLUSH_REQUEST,
+                                    ID,
+                                    client_id
+                                ]))
+                        # Also flush data for this coordinator since it is responsible for sending the EOF to aggregation.
+                        self._send_client_data_to_aggregation(client_id)
+                        self._send_eof_to_aggregation(client_id)
+                    logging.info(f"Not enough records received for client {client_id}. RETRYING sum control message to other workers")
+                    self.workers_finished_by_client_id[client_id] = 0
+                    self.aggregate_records_by_client[client_id] = self.current_records_by_client.get(client_id, 0)
+                    time.sleep(RETRY_SLEEP_SECONDS)
+                    self._broadcast_record_count_request(client_id)
+                    self.retries_by_client_id[client_id] = self.retries_by_client_id.get(client_id, 0) + 1
+
             else:
                 logging.info(f"Received all count responses for client {client_id}, broadcasting flush request")
                 for instance_id, control_exchange in self.control_exchanges.items():
@@ -155,16 +184,6 @@ class SumFilter:
                 self._send_client_data_to_aggregation(client_id)
                 self._send_eof_to_aggregation(client_id)
 
-
-    def _process_worker_finished(self, client_id):
-        logging.info(f"FLUSH_SUCCESS message received for client {client_id}")
-        with self.resourceLock:
-            self.workers_finished_by_client_id[client_id] = self.workers_finished_by_client_id.get(
-                client_id, 0
-            ) + 1
-            if self.workers_finished_by_client_id[client_id] == SUM_AMOUNT:
-                logging.info(f"All workers have broadcast their data for client {client_id}")
-                # TODO: Clean up data structures for client_id here to free up memory.
     
     """
     Middleware callback methods for consuming messages from the input queue and control exchange.
@@ -192,7 +211,7 @@ class SumFilter:
         elif fields[0] == message_protocol.internal.WorkerControlMessageType.FLUSH_REQUEST:
             self._flush_client_data(*fields[1:])
         elif fields[0] == message_protocol.internal.WorkerControlMessageType.FLUSH_SUCCESS:
-            self._process_worker_finished(*fields[1:])
+            logging.info(f"FLUSH_SUCCESS message received for client {fields[1]}")
         else:
             logging.error("Received sum control message with unknown type")
             nack()
