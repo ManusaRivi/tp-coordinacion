@@ -74,11 +74,21 @@ class SumFilter:
             )
 
 
+    def _cleanup_client_state(self, client_id):
+        self.fruit_amount_by_client_id.pop(client_id, None)
+        self.workers_finished_by_client_id.pop(client_id, None)
+        self.retries_by_client_id.pop(client_id, None)
+        self.current_records_by_client.pop(client_id, None)
+        self.total_records_by_client.pop(client_id, None)
+        self.aggregate_records_by_client.pop(client_id, None)
+
+
     def _flush_client_data(self, coordinator_id, client_id, is_coordinator=False):
         logging.info(f"Flushing data to aggregation for client {client_id}")
         with self.resourceLock:
             self._send_client_data_to_aggregation(client_id)
             self._send_eof_to_aggregation(client_id)
+            self._cleanup_client_state(client_id)
             if not is_coordinator:
                 logging.info(f"Finished flushing data for client {client_id}, ACKing coordinator")
                 self.control_exchanges[coordinator_id].send(message_protocol.internal.serialize([
@@ -123,6 +133,7 @@ class SumFilter:
                 logging.info(f"Only one Sum worker, flushing data to aggregation for client {client_id}")
                 self._send_client_data_to_aggregation(client_id)
                 self._send_eof_to_aggregation(client_id)
+                self._cleanup_client_state(client_id)
                 return
             # The Sum worker that receives the EOF message becomes the Coordinator.
             logging.info(f"Broadcasting sum control message to other workers")
@@ -164,6 +175,8 @@ class SumFilter:
                         # Also flush data for this coordinator since it is responsible for sending the EOF to aggregation.
                         self._send_client_data_to_aggregation(client_id)
                         self._send_eof_to_aggregation(client_id)
+                        self._cleanup_client_state(client_id)
+                        return
                     logging.info(f"Not enough records received for client {client_id}. RETRYING sum control message to other workers")
                     self.workers_finished_by_client_id[client_id] = 0
                     self.aggregate_records_by_client[client_id] = self.current_records_by_client.get(client_id, 0)
@@ -183,6 +196,7 @@ class SumFilter:
                 # Also flush data for this coordinator since it is responsible for sending the EOF to aggregation.
                 self._send_client_data_to_aggregation(client_id)
                 self._send_eof_to_aggregation(client_id)
+                self._cleanup_client_state(client_id)
 
     
     """
