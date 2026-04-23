@@ -32,79 +32,59 @@ class AggregationFilter:
             )
             self.control_exchanges[i] = control_exchange
         self.fruit_tops_by_client_id = {}
+        self.sum_workers_finished_by_client_id = {}
 
-        self.workers_finished_by_client_id = {}
-
-        self.resourceLock = threading.Lock()
-        self.coordination_thread = None
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
-        with self.resourceLock:
-            if client_id not in self.fruit_tops_by_client_id:
-                self.fruit_tops_by_client_id[client_id] = []
-            # Check if the fruit's already in the list and save the index:
-            # After list is iterated, element is removed and reinserted.
-            # Otherwise, it's modified in the same spot and the sorting is broken.
-            already_in_list = False
-            previous_index = 0
-            fruit_top = self.fruit_tops_by_client_id[client_id]
-            for i in range(len(fruit_top)):
-                if fruit_top[i].fruit == fruit:
-                    already_in_list = True
-                    previous_index = i
-            if already_in_list:
-                amount += fruit_top[previous_index].amount
-                fruit_top.pop(previous_index)
-            
-            bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
+        if client_id not in self.fruit_tops_by_client_id:
+            self.fruit_tops_by_client_id[client_id] = []
+        # Check if the fruit's already in the list and save the index:
+        # After list is iterated, element is removed and reinserted.
+        # Otherwise, it's modified in the same spot and the sorting is broken.
+        already_in_list = False
+        previous_index = 0
+        fruit_top = self.fruit_tops_by_client_id[client_id]
+        for i in range(len(fruit_top)):
+            if fruit_top[i].fruit == fruit:
+                already_in_list = True
+                previous_index = i
+        if already_in_list:
+            amount += fruit_top[previous_index].amount
+            fruit_top.pop(previous_index)
+        
+        bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
 
     def _process_eof(self, client_id):
         logging.info(f"Received EOF, broadcasting flush request for client {client_id}")
-        self._send_fruit_top_for_client(client_id)
-        with self.resourceLock:
-            self.workers_finished_by_client_id[client_id] = 1
-            for instance_id, control_exchange in self.control_exchanges.items():
-                if instance_id != ID:
-                    control_exchange.send(message_protocol.internal.serialize([
-                        message_protocol.internal.WorkerControlMessageType.FLUSH_REQUEST,
-                        ID,
-                        client_id
-                    ]))
+        # Only do this if all workers have sent EOF.
+        # Increment sum workers finished for that client, and if that equals SUM_AMOUNT,
+        # send flush request to all other aggregation workers and send top for client to output_queue.
+        self.sum_workers_finished_by_client_id[client_id] = self.sum_workers_finished_by_client_id.get(
+            client_id, 0
+        ) + 1
+        if self.sum_workers_finished_by_client_id[client_id] < SUM_AMOUNT:
+            logging.info(f"Received EOF from {self.sum_workers_finished_by_client_id[client_id]} sum workers for client {client_id}, waiting for more")
+        else:
+            logging.info(f"Received EOF from all sum workers for client {client_id}")
+            self._send_fruit_top_for_client(client_id)
+
     
     def _send_fruit_top_for_client(self, client_id):
-        with self.resourceLock:
-            logging.info(f"Sending top message")
-            fruit_top = []
-            if client_id in self.fruit_tops_by_client_id:
-                fruit_chunk = list(self.fruit_tops_by_client_id[client_id][-TOP_SIZE:])
-                fruit_chunk.reverse()
-                fruit_top = list(
-                    map(
-                        lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
-                        fruit_chunk,
-                    )
+        logging.info(f"Sending top message")
+        fruit_top = []
+        if client_id in self.fruit_tops_by_client_id:
+            fruit_chunk = list(self.fruit_tops_by_client_id[client_id][-TOP_SIZE:])
+            fruit_chunk.reverse()
+            fruit_top = list(
+                map(
+                    lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
+                    fruit_chunk,
                 )
-                self.output_queue.send(message_protocol.internal.serialize([client_id] + fruit_top))
-    
-    def _process_flush_request(self, coordinator_id, client_id):
-        logging.info(f"FLUSH_REQUEST received for client {client_id}, sending top to output_queue")
-        self._send_fruit_top_for_client(client_id)
-        logging.info(f"Sending FLUSH_SUCCESS message to coordinator {coordinator_id}")
-        with self.resourceLock:
-            self.control_exchanges[coordinator_id].send(message_protocol.internal.serialize([
-                message_protocol.internal.WorkerControlMessageType.FLUSH_SUCCESS,
-                client_id
-            ]))
+            )
+        # Always send one message per aggregation worker so Join can count AGGREGATION_AMOUNT.
+        self.output_queue.send(message_protocol.internal.serialize([client_id] + fruit_top))
 
-    def _process_worker_finished(self, client_id):
-        logging.info(f"FLUSH_SUCCESS message received for client {client_id}")
-        with self.resourceLock:
-            self.workers_finished_by_client_id[client_id] = self.workers_finished_by_client_id.get(
-                client_id, 0
-            ) + 1
-            if self.workers_finished_by_client_id[client_id] == AGGREGATION_AMOUNT:
-                logging.info(f"All other workers have sent their top for client {client_id}")
 
     def process_messsage(self, message, ack, nack):
         logging.info("Process message")
@@ -115,21 +95,8 @@ class AggregationFilter:
             self._process_eof(*fields)
         ack()
     
-    def process_aggregation_sync(self, message, ack, nack):
-        fields = message_protocol.internal.deserialize(message)
-        logging.info(f"Processing aggregation control message: {fields}")
-        if fields[0] == message_protocol.internal.WorkerControlMessageType.FLUSH_REQUEST:
-            self._process_flush_request(*fields[1:])
-        elif fields[0] == message_protocol.internal.WorkerControlMessageType.FLUSH_SUCCESS:
-            self._process_worker_finished(*fields[1:])
-        else:
-            logging.error("Received aggregation control message with unknown type")
-            nack()
-            return # Exception here as well?
-        ack()
 
     def start(self):
-        self.coordination_thread = threading.Thread(target=self.control_exchanges[ID].start_consuming, args=(self.process_aggregation_sync,)).start()
         self.input_exchange.start_consuming(self.process_messsage)
     
     def stop(self):
@@ -138,8 +105,6 @@ class AggregationFilter:
         for control_exchange in self.control_exchanges.values():
             control_exchange.stop_consuming()
         self.output_queue.close()
-        if self.coordination_thread:
-            self.coordination_thread.join()
         logging.info("AggregationFilter stopped")
 
 
