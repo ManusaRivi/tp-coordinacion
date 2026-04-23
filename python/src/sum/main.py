@@ -83,12 +83,16 @@ class SumFilter:
         self.aggregate_records_by_client.pop(client_id, None)
 
 
+    def _flush_and_cleanup_client(self, client_id):
+        self._send_client_data_to_aggregation(client_id)
+        self._send_eof_to_aggregation(client_id)
+        self._cleanup_client_state(client_id)
+
+
     def _flush_client_data(self, coordinator_id, client_id, is_coordinator=False):
         logging.info(f"Flushing data to aggregation for client {client_id}")
         with self.resourceLock:
-            self._send_client_data_to_aggregation(client_id)
-            self._send_eof_to_aggregation(client_id)
-            self._cleanup_client_state(client_id)
+            self._flush_and_cleanup_client(client_id)
             if not is_coordinator:
                 logging.info(f"Finished flushing data for client {client_id}, ACKing coordinator")
                 self.control_exchanges[coordinator_id].send(message_protocol.internal.serialize([
@@ -103,6 +107,16 @@ class SumFilter:
             if instance_id != ID:
                 control_exchange.send(message_protocol.internal.serialize([
                     message_protocol.internal.WorkerControlMessageType.RECORD_COUNT_REQUEST,
+                    ID,
+                    client_id
+                ]))
+
+
+    def _broadcast_flush_request(self, client_id):
+        for instance_id, control_exchange in self.control_exchanges.items():
+            if instance_id != ID:
+                control_exchange.send(message_protocol.internal.serialize([
+                    message_protocol.internal.WorkerControlMessageType.FLUSH_REQUEST,
                     ID,
                     client_id
                 ]))
@@ -131,9 +145,7 @@ class SumFilter:
             logging.info(f"Worker {ID} has sent all data for client {client_id}. Total records sent by this client: {amount_of_records}")
             if SUM_AMOUNT == 1:
                 logging.info(f"Only one Sum worker, flushing data to aggregation for client {client_id}")
-                self._send_client_data_to_aggregation(client_id)
-                self._send_eof_to_aggregation(client_id)
-                self._cleanup_client_state(client_id)
+                self._flush_and_cleanup_client(client_id)
                 return
             # The Sum worker that receives the EOF message becomes the Coordinator.
             logging.info(f"Broadcasting sum control message to other workers")
@@ -163,40 +175,25 @@ class SumFilter:
             if self.aggregate_records_by_client[client_id] < self.total_records_by_client[client_id]:
                 logging.info(f"Waiting for more responses for client {client_id}. Total: {self.aggregate_records_by_client[client_id]}, expected: {self.total_records_by_client[client_id]}")
                 if self.workers_finished_by_client_id[client_id] == SUM_AMOUNT - 1:
-                    if self.retries_by_client_id[client_id] == MAX_RETRY_ATTEMPTS:
+                    retries = self.retries_by_client_id.get(client_id, 0)
+                    if retries == MAX_RETRY_ATTEMPTS:
                         logging.error(f"Exceeded retry attempts for client {client_id}, expected {self.total_records_by_client[client_id]} records but got {self.aggregate_records_by_client[client_id]}. Flushing data to aggregation anyway.")
-                        for instance_id, control_exchange in self.control_exchanges.items():
-                            if instance_id != ID:
-                                control_exchange.send(message_protocol.internal.serialize([
-                                    message_protocol.internal.WorkerControlMessageType.FLUSH_REQUEST,
-                                    ID,
-                                    client_id
-                                ]))
+                        self._broadcast_flush_request(client_id)
                         # Also flush data for this coordinator since it is responsible for sending the EOF to aggregation.
-                        self._send_client_data_to_aggregation(client_id)
-                        self._send_eof_to_aggregation(client_id)
-                        self._cleanup_client_state(client_id)
+                        self._flush_and_cleanup_client(client_id)
                         return
                     logging.info(f"Not enough records received for client {client_id}. RETRYING sum control message to other workers")
                     self.workers_finished_by_client_id[client_id] = 0
                     self.aggregate_records_by_client[client_id] = self.current_records_by_client.get(client_id, 0)
                     time.sleep(RETRY_SLEEP_SECONDS)
                     self._broadcast_record_count_request(client_id)
-                    self.retries_by_client_id[client_id] = self.retries_by_client_id.get(client_id, 0) + 1
+                    self.retries_by_client_id[client_id] = retries + 1
 
             else:
                 logging.info(f"Received all count responses for client {client_id}, broadcasting flush request")
-                for instance_id, control_exchange in self.control_exchanges.items():
-                    if instance_id != ID:
-                        control_exchange.send(message_protocol.internal.serialize([
-                            message_protocol.internal.WorkerControlMessageType.FLUSH_REQUEST,
-                            ID,
-                            client_id
-                        ]))
+                self._broadcast_flush_request(client_id)
                 # Also flush data for this coordinator since it is responsible for sending the EOF to aggregation.
-                self._send_client_data_to_aggregation(client_id)
-                self._send_eof_to_aggregation(client_id)
-                self._cleanup_client_state(client_id)
+                self._flush_and_cleanup_client(client_id)
 
     
     """
@@ -233,7 +230,11 @@ class SumFilter:
         ack()
 
     def start(self):
-        self.coordination_thread = threading.Thread(target=self.control_exchanges[ID].start_consuming, args=(self.process_sum_sync,)).start()
+        self.coordination_thread = threading.Thread(
+            target=self.control_exchanges[ID].start_consuming,
+            args=(self.process_sum_sync,),
+        )
+        self.coordination_thread.start()
         self.input_queue.start_consuming(self.process_data_messsage)
     
     def stop(self):
