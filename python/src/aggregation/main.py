@@ -34,6 +34,24 @@ class AggregationFilter:
         self.fruit_tops_by_client_id = {}
         self.sum_workers_finished_by_client_id = {}
 
+    def _cleanup_client_state(self, client_id):
+        self.fruit_tops_by_client_id.pop(client_id, None)
+        self.sum_workers_finished_by_client_id.pop(client_id, None)
+
+    def _send_fruit_top_for_client(self, client_id):
+        logging.info(f"Sending top message")
+        fruit_top = []
+        if client_id in self.fruit_tops_by_client_id:
+            fruit_chunk = list(self.fruit_tops_by_client_id[client_id][-TOP_SIZE:])
+            fruit_chunk.reverse()
+            fruit_top = list(
+                map(
+                    lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
+                    fruit_chunk,
+                )
+            )
+        # Always send one message per aggregation worker so Join can count AGGREGATION_AMOUNT.
+        self.output_queue.send(message_protocol.internal.serialize([client_id] + fruit_top))
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
@@ -68,23 +86,7 @@ class AggregationFilter:
         else:
             logging.info(f"Received EOF from all sum workers for client {client_id}")
             self._send_fruit_top_for_client(client_id)
-
-    
-    def _send_fruit_top_for_client(self, client_id):
-        logging.info(f"Sending top message")
-        fruit_top = []
-        if client_id in self.fruit_tops_by_client_id:
-            fruit_chunk = list(self.fruit_tops_by_client_id[client_id][-TOP_SIZE:])
-            fruit_chunk.reverse()
-            fruit_top = list(
-                map(
-                    lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
-                    fruit_chunk,
-                )
-            )
-        # Always send one message per aggregation worker so Join can count AGGREGATION_AMOUNT.
-        self.output_queue.send(message_protocol.internal.serialize([client_id] + fruit_top))
-
+            self._cleanup_client_state(client_id)
 
     def process_messsage(self, message, ack, nack):
         logging.info("Process message")
@@ -94,7 +96,6 @@ class AggregationFilter:
         else:
             self._process_eof(*fields)
         ack()
-    
 
     def start(self):
         self.input_exchange.start_consuming(self.process_messsage)

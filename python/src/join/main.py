@@ -25,6 +25,10 @@ class JoinFilter:
         )
         self.amount_by_fruit_by_client_id = {}
         self.tops_received_by_client_id = {}
+    
+    def _cleanup_client_state(self, client_id):
+        self.amount_by_fruit_by_client_id.pop(client_id, None)
+        self.tops_received_by_client_id.pop(client_id, None)
 
     def process_messsage(self, message, ack, nack):
         logging.info("Received top")
@@ -59,6 +63,7 @@ class JoinFilter:
                 )
             )
             self.output_queue.send(message_protocol.internal.serialize([client_id] + serialized_fruit_top))
+            self._cleanup_client_state(client_id)
         ack()
 
     def start(self):
