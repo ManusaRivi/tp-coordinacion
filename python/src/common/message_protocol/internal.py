@@ -1,8 +1,10 @@
 import json
 
 class WorkerControlMessageType:
-    FLUSH_REQUEST = 1
-    FLUSH_SUCCESS = 2
+    RECORD_COUNT_REQUEST = 1
+    RECORD_COUNT_RESPONSE = 2
+    FLUSH_REQUEST = 3
+    FLUSH_SUCCESS = 4
 
 
 def serialize(message):
